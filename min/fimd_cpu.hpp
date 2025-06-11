@@ -403,7 +403,7 @@ private:
  * \param im_width Image width.
  * \return The 1D coordinate.
  */
-inline int coord2to1(Point2D point, unsigned im_width) { return (point[1] * im_width) + point[0]; };
+inline int coord2to1(const Point2D& point, const unsigned& im_width) { return (point[1] * im_width) + point[0]; };
 
 /**
  * \brief Converts a 1D coordinate to a 2D point.
@@ -411,7 +411,7 @@ inline int coord2to1(Point2D point, unsigned im_width) { return (point[1] * im_w
  * \param im_width Image width.
  * \return The 2D point.
  */
-inline Point2D coord1to2(size_t coord1d, unsigned im_width) { return Point2D{static_cast<int>(coord1d % im_width), static_cast<int>(coord1d / im_width)}; };
+inline Point2D coord1to2(const size_t& coord1d, const unsigned& im_width) { return Point2D{static_cast<int>(coord1d % im_width), static_cast<int>(coord1d / im_width)}; };
 
 
 /**
@@ -479,7 +479,7 @@ public:
         *reinterpret_cast<TERM_SEQ*>((target_image) + (im_width_ * im_height_) - sizeof(TERM_SEQ)) = termination_;
         PIXEL* cursor = target_image + offset_;
 
-        LOOP:
+        while (true) {
             // check for the presence of the termination sequence
             if (*reinterpret_cast<TERM_SEQ*>((cursor) + offset_ - sizeof(TERM_SEQ)) == termination_) {
                 return reinterpret_cast<size_t>(cursor) - reinterpret_cast<size_t>(target_image) - offset_;
@@ -487,68 +487,60 @@ public:
 
             // load new pixel value from pre-incremented address
             PIXEL pix_val = *(++cursor);
-            if (pix_val <= threshold_center_) goto LOOP;
+            if (pix_val <= threshold_center_) continue;
 
             // first boundary pixel test - decide between MARKER_TEST and SUN_TEST
             if ((pix_val - *(cursor + coord2to1(boundary[0], im_width_))) <= threshold_diff_) {
-                if (pix_val >= threshold_sun_) goto SUN_TEST;
-            } else {
-                goto MARKER_TEST;
-            }
+                if (pix_val >= threshold_sun_) { // SUN_TEST:
+                    // testing of the boundary pixels
+                    if (boundary_unroll([&](const Point2D& point) -> bool {
+                        return (pix_val - *(cursor + coord2to1(point, im_width_))) > threshold_diff_;
+                    })) continue;
 
-            // otherwise go to the next pixel
-            goto LOOP;
+                    // clearing interior pixels
+                    interior_unroll([&](const Point2D& point) -> void {
+                        *(cursor + coord2to1(point, im_width_)) = 0x00;
+                    });
 
-        SUN_TEST:
-            // testing of the boundary pixels
-            if (boundary_unroll([&](const Point2D point) -> bool {
-                return (pix_val - *(cursor + coord2to1(point, im_width_))) > threshold_diff_;
-            })) goto LOOP;
+                    // store the center as a sun point
+                    sun_points.push_back(coord1to2(reinterpret_cast<size_t>(cursor) - reinterpret_cast<size_t>(target_image), im_width_));
 
-            // clearing interior pixels
-            interior_unroll([&](const Point2D point) -> bool {
-                *(cursor + coord2to1(point, im_width_)) = 0x00;
-                return false;
-            });
-
-            // store the center as a sun point
-            sun_points.push_back(coord1to2(reinterpret_cast<size_t>(cursor) - reinterpret_cast<size_t>(target_image), im_width_));
-
-            // check the current number of the detected sun points
-            if (sun_points.size() == max_sun_points_count_) {
-                *reinterpret_cast<TERM_SEQ*>((cursor) + offset_ - sizeof(TERM_SEQ)) = termination_;
-            }
-            goto LOOP;
-
-        MARKER_TEST:
-            // testing of the boundary pixels
-            if (boundary_unroll([&](const Point2D point) -> bool {
-                return (pix_val - *(cursor + coord2to1(point, im_width_))) <= threshold_diff_;
-            })) goto LOOP;
-
-            // search for a peak in the interior
-            PIXEL peak = 0;
-            size_t peak_pos = 0;
-            PIXEL* curr_int_ptr = nullptr;
-
-            interior_unroll([&](const Point2D point) -> bool {
-                curr_int_ptr = cursor + coord2to1(point, im_width_);
-                if (*curr_int_ptr > peak) {
-                    peak = *curr_int_ptr;
-                    peak_pos = reinterpret_cast<size_t>(curr_int_ptr) - reinterpret_cast<size_t>(target_image);
+                    // check the current number of the detected sun points
+                    if (sun_points.size() == max_sun_points_count_) {
+                        *reinterpret_cast<TERM_SEQ*>((cursor) + offset_ - sizeof(TERM_SEQ)) = termination_;
+                    }
                 }
-                *curr_int_ptr = 0x00;
-                return false;
-            });
+            } else { // MARKER_TEST:
+                // testing of the boundary pixels
+                if (boundary_unroll([&](const Point2D& point) -> bool {
+                    return (pix_val - *(cursor + coord2to1(point, im_width_))) <= threshold_diff_;
+                })) continue;
 
-            // store the detected peak as a marker
-            markers.push_back(coord1to2(peak_pos, im_width_));
+                // search for a peak in the interior
+                PIXEL peak = 0;
+                size_t peak_pos = 0;
+                PIXEL* curr_int_ptr = nullptr;
 
-            // check the current number of the detected markers
-            if (markers.size() == max_markers_count_) {
-                *reinterpret_cast<TERM_SEQ*>((cursor) + offset_ - sizeof(TERM_SEQ)) = termination_;
+                interior_unroll([&](const Point2D& point) -> void {
+                    curr_int_ptr = cursor + coord2to1(point, im_width_);
+                    if (*curr_int_ptr > peak) {
+                        peak = *curr_int_ptr;
+                        peak_pos = reinterpret_cast<size_t>(curr_int_ptr) - reinterpret_cast<size_t>(target_image);
+                    }
+                    *curr_int_ptr = 0x00;
+                });
+
+                // store the detected peak as a marker
+                markers.push_back(coord1to2(peak_pos, im_width_));
+
+                // check the current number of the detected markers
+                if (markers.size() == max_markers_count_) {
+                    *reinterpret_cast<TERM_SEQ*>((cursor) + offset_ - sizeof(TERM_SEQ)) = termination_;
+                }
             }
-            goto LOOP;
+
+            // go to the next pixel
+        }
     };
 
     /**
@@ -692,13 +684,13 @@ private:
     }
 
     template<unsigned... I, class F>
-    static constexpr bool interior_unroll_helper(std::integer_sequence<unsigned, I...>, F&& f) {
-        return (f(interior[I]) or ...);
+    static constexpr void interior_unroll_helper(std::integer_sequence<unsigned, I...>, F&& f) {
+        (f(interior[I]), ...);
     }
 
     template<class F>
-    static constexpr bool interior_unroll(F&& f) {
-        return interior_unroll_helper(std::make_integer_sequence<unsigned, interior.length()>{}, std::forward<F>(f));
+    static constexpr void interior_unroll(F&& f) {
+        interior_unroll_helper(std::make_integer_sequence<unsigned, interior.length()>{}, std::forward<F>(f));
     }
 };
 
